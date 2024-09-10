@@ -19,6 +19,9 @@ import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
 
 import {FixedPointMathLib} from "solmate/src/utils/FixedPointMathLib.sol";
 
+// @author: PPrado
+// @title: TrailHook
+
 /**
  * For placing trailing orders, we need:
  * 1. Pool the order is for (PoolKey)
