@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 pragma solidity ^0.8.0;
 
+import "forge-std/console.sol";
 import {BaseHook} from "v4-periphery/src/base/hooks/BaseHook.sol";
 import {ERC1155} from "@openzeppelin/contracts/token/ERC1155/ERC1155.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
@@ -42,7 +43,9 @@ contract TrailHook is BaseHook, ERC1155 {
         int24 trailingDistance;
         int24 lastTrackedTick;
         bool zeroForOne;
-        uint256 minOutputAmount; // New field for slippage protection
+        uint256 minOutputAmount;
+        int24 startTick; // New field to store the tick at which trailing should start
+        bool isActive; // New field to indicate if the order is active
     }
 
     // Storage
@@ -57,17 +60,25 @@ contract TrailHook is BaseHook, ERC1155 {
 
     // Events
     event TrailingOrderPlaced(
-        uint256 indexed orderId, address indexed owner, int24 trailingDistance, uint256 inputAmount, bool zeroForOne
+        uint256 indexed orderId,
+        address indexed owner,
+        int24 trailingDistance,
+        uint256 inputAmount,
+        bool zeroForOne,
+        int24 startTick,
+        bool isActive
     );
     event TrailingOrderExecuted(uint256 indexed orderId, int24 executionTick, uint256 outputAmount);
     event TrailingOrderCancelled(uint256 indexed orderId);
     event LastTrackedTickUpdated(uint256 indexed orderId, int24 newLastTrackedTick);
+    event OrderActivated(uint256 indexed orderId, int24 activationTick);
 
     // Errors
     error InvalidOrder();
     error NothingToClaim();
     error NotEnoughToClaim();
     error Unauthorized();
+    error SlippageToleranceExceeded();
 
     constructor(IPoolManager _manager, string memory _uri) BaseHook(_manager) ERC1155(_uri) {}
 
@@ -124,17 +135,27 @@ contract TrailHook is BaseHook, ERC1155 {
         int24 trailingDistance,
         bool zeroForOne,
         uint256 inputAmount,
-        uint256 minOutputAmount
+        uint256 minOutputAmount,
+        int24 startTick
     ) external returns (uint256 orderId) {
+        // Transfer tokens to the contract first
+        address sellToken = zeroForOne ? Currency.unwrap(key.currency0) : Currency.unwrap(key.currency1);
+        IERC20(sellToken).transferFrom(msg.sender, address(this), inputAmount);
+
+        // Then proceed with state changes
         orderId = nextOrderId++;
         (, int24 currentTick,,) = poolManager.getSlot0(key.toId());
+
+        bool isActive = (zeroForOne && currentTick <= startTick) || (!zeroForOne && currentTick >= startTick);
 
         trailingOrders[key.toId()][orderId] = TrailingOrder({
             inputAmount: inputAmount,
             trailingDistance: trailingDistance,
-            lastTrackedTick: currentTick,
+            lastTrackedTick: isActive ? currentTick : startTick,
             zeroForOne: zeroForOne,
-            minOutputAmount: minOutputAmount
+            minOutputAmount: minOutputAmount,
+            startTick: startTick,
+            isActive: isActive
         });
 
         orderOwners[orderId] = msg.sender;
@@ -144,11 +165,7 @@ contract TrailHook is BaseHook, ERC1155 {
         claimTokensSupply[positionId] += inputAmount;
         _mint(msg.sender, positionId, inputAmount, "");
 
-        // Transfer tokens to the contract
-        address sellToken = zeroForOne ? Currency.unwrap(key.currency0) : Currency.unwrap(key.currency1);
-        IERC20(sellToken).transferFrom(msg.sender, address(this), inputAmount);
-
-        emit TrailingOrderPlaced(orderId, msg.sender, trailingDistance, inputAmount, zeroForOne);
+        emit TrailingOrderPlaced(orderId, msg.sender, trailingDistance, inputAmount, zeroForOne, startTick, isActive);
     }
 
     function cancelTrailingOrder(PoolKey calldata key, uint256 orderId) external {
@@ -203,28 +220,50 @@ contract TrailHook is BaseHook, ERC1155 {
         while (orderId < nextOrderId) {
             TrailingOrder storage order = trailingOrders[poolId][orderId];
 
+            // @notice If the order has no input amount, skip it
+            // @dev This is to prevent invalid or already executed orders from being processed
             if (order.inputAmount == 0) {
                 orderId++;
                 continue;
             }
 
+            // @notice Activate the order if it wasn't active and the condition is met,
+            // this allows users to place orders that start trailing at a future tick (different from the current tick)
+            // @dev If the order is not active, we check if the current tick satisfies the activation condition
+            // If it does, we activate the order and set the last tracked tick to the current tick
+            // If it doesn't, we skip to the next order
+            if (!order.isActive) {
+                if (
+                    (order.zeroForOne && currentTick <= order.startTick)
+                        || (!order.zeroForOne && currentTick >= order.startTick)
+                ) {
+                    order.isActive = true;
+                    order.lastTrackedTick = currentTick;
+                    emit OrderActivated(orderId, currentTick);
+                } else {
+                    orderId++;
+                    continue;
+                }
+            }
+
             bool shouldExecute = false;
+            int24 tickDifference = currentTick - order.lastTrackedTick;
 
             if (order.zeroForOne) {
-                // For zeroForOne (selling token0), we execute when price goes up
-                if (currentTick > order.lastTrackedTick) {
+                // For zeroForOne (selling token0), we execute when price goes down
+                if (tickDifference < 0 && -tickDifference >= order.trailingDistance) {
+                    shouldExecute = true;
+                } else if (tickDifference > 0) {
                     order.lastTrackedTick = currentTick;
                     emit LastTrackedTickUpdated(orderId, currentTick);
-                } else if (currentTick <= order.lastTrackedTick - order.trailingDistance) {
-                    shouldExecute = true;
                 }
             } else {
-                // For !zeroForOne (selling token1), we execute when price goes down
-                if (currentTick < order.lastTrackedTick) {
+                // For !zeroForOne (selling token1), we execute when price goes up
+                if (tickDifference > 0 && tickDifference >= order.trailingDistance) {
+                    shouldExecute = true;
+                } else if (tickDifference < 0) {
                     order.lastTrackedTick = currentTick;
                     emit LastTrackedTickUpdated(orderId, currentTick);
-                } else if (currentTick >= order.lastTrackedTick + order.trailingDistance) {
-                    shouldExecute = true;
                 }
             }
 
@@ -242,12 +281,13 @@ contract TrailHook is BaseHook, ERC1155 {
             IPoolManager.SwapParams({
                 zeroForOne: order.zeroForOne,
                 amountSpecified: -int256(order.inputAmount),
-                sqrtPriceLimitX96: 0 // Market execution
+                sqrtPriceLimitX96: order.zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1 // TODO: Market execution, this needs review
             })
         );
 
         uint256 outputAmount = order.zeroForOne ? uint256(int256(delta.amount1())) : uint256(int256(delta.amount0()));
-        require(outputAmount >= order.minOutputAmount, "Slippage tolerance exceeded");
+
+        if (outputAmount < order.minOutputAmount) revert SlippageToleranceExceeded();
 
         uint256 positionId = getPositionId(key, orderId);
 
