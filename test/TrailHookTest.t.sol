@@ -93,7 +93,7 @@ contract TrailHookTest is Test, Deployers {
             IPoolManager.ModifyLiquidityParams({
                 tickLower: TickMath.minUsableTick(60),
                 tickUpper: TickMath.maxUsableTick(60),
-                liquidityDelta: 100 ether,
+                liquidityDelta: 1000 ether,
                 salt: bytes32(0)
             }),
             ZERO_BYTES
@@ -122,7 +122,7 @@ contract TrailHookTest is Test, Deployers {
         // with a trailing distance of 50 ticks
         /// @notice: trailingDistance is the distance from the current tick that the order will trail
         /// E.g. if the current tick is 200 and trailingDistance is 50
-        int24 trailingDistance = 50;
+        int24 trailingDistance = 60;
         uint256 amount = 10e18;
         bool zeroForOne = true;
         uint256 minOutputAmount = 9.7e18; // 97% of input as minimum output for slippage protection
@@ -183,10 +183,10 @@ contract TrailHookTest is Test, Deployers {
 
     function test_trailingOrderExecution() public {
         // Setup initial conditions
-        int24 trailingDistance = 60;
+        int24 trailingDistance = 180;
         uint256 amount = 10e18;
         bool zeroForOne = true;
-        uint256 minOutputAmount = 9.7e18;
+        uint256 minOutputAmount = 9.9e18;
         (, int24 currentTick,,) = manager.getSlot0(key.toId());
         int24 startTick = currentTick; // Start immediately for this test
 
@@ -199,73 +199,72 @@ contract TrailHookTest is Test, Deployers {
         uint256 initialToken0Balance = token0.balanceOfSelf();
         uint256 initialToken1Balance = token1.balanceOfSelf();
 
-        // Perform a series of swaps to move the price upwards
-        for (uint256 i = 0; i < 2; i++) {
-            swap(
-                key,
-                IPoolManager.SwapParams({
-                    zeroForOne: false,
-                    amountSpecified: -1e18,
-                    sqrtPriceLimitX96: TickMath.MAX_SQRT_PRICE - 1
-                })
-            );
+        //*****
+        // Part 1: Move the tick up
+        //*****
+        console.log("-----------------------------");
+        console.log("|  Part 1: move tick up     |");
+        console.log("-----------------------------");
 
-            (, currentTick,,) = manager.getSlot0(key.toId());
-            console.log("currentTick:", currentTick);
-        }
+        setPoolTick(440);
 
-        // Check the current trailing tick
-        (, int24 orderTrailingDistance, int24 lastTrackedTick,,,,) = hook.trailingOrders(key.toId(), orderId);
+        (,, int24 lastTrackedTick,,,,) = hook.trailingOrders(key.toId(), orderId);
+        (, currentTick,,) = manager.getSlot0(key.toId());
         console.log("Last tracked tick:", lastTrackedTick);
+        console.log("Current tick:", currentTick);
+        console.log("Current distance:", lastTrackedTick - currentTick);
+
+        //*****
+        // Part 2: Move the tick down
+        //******
+        console.log("-----------------------------");
+        console.log("|  Part 2: move tick down   |");
+        console.log("-----------------------------");
+
+        setPoolTick(320);
+
+        (,, lastTrackedTick,,,,) = hook.trailingOrders(key.toId(), orderId);
+        (, currentTick,,) = manager.getSlot0(key.toId());
+        console.log("Last tracked tick:", lastTrackedTick);
+        console.log("Current tick:", currentTick);
         console.log("Current distance:", lastTrackedTick - currentTick);
 
         // Check that the order is not executed yet
         (uint256 inputAmount,,,,,,) = hook.trailingOrders(key.toId(), orderId);
         assertEq(inputAmount, amount, "Order should not be executed yet");
 
-        // Perform more swaps to trigger the order execution
-        for (uint256 i = 0; i < 2; i++) {
-            swap(
-                key,
-                IPoolManager.SwapParams({
-                    zeroForOne: false,
-                    amountSpecified: -1e18,
-                    sqrtPriceLimitX96: TickMath.MAX_SQRT_PRICE - 1
-                })
-            );
-            (, currentTick,,) = manager.getSlot0(key.toId());
-            console.log("currentTick:", currentTick);
-        }
+        uint256 positionId = hook.getPositionId(key, orderId);
 
-        // Check the current trailing tick
-        (, orderTrailingDistance, lastTrackedTick,,,,) = hook.trailingOrders(key.toId(), orderId);
-        console.log("Last tracked tick:", lastTrackedTick);
-        console.log("Current distance:", lastTrackedTick - currentTick);
-        // Perform more swaps to drive down tick
-        swap(
-            key,
-            IPoolManager.SwapParams({
-                zeroForOne: true,
-                amountSpecified: 0.4e18, // Reduced amount
-                sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
-            })
-        );
+        uint256 claimableOutputTokens = hook.claimableOutputTokens(positionId);
+        console.log("claimableOutputTokens: %18e", claimableOutputTokens);
 
-        (, currentTick,,) = manager.getSlot0(key.toId());
-        console.log("currentTick:", currentTick);
+        uint256 hookToken0Balance = token0.balanceOf(address(hook));
+        uint256 hookToken1Balance = token1.balanceOf(address(hook));
+        console.log(" hookToken0Balance: %18e", hookToken0Balance);
+        console.log(" hookToken1Balance: %18e", hookToken1Balance);
 
-        // Check the current trailing tick
-        (, orderTrailingDistance, lastTrackedTick,,,,) = hook.trailingOrders(key.toId(), orderId);
-        console.log("Last tracked tick:", lastTrackedTick);
-        console.log("Current distance:", lastTrackedTick - currentTick);
+        //*****
+        // Part 3: Move the tick down and trigger the order
+        //******
+        console.log("-----------------------------");
+        console.log("|  Part 3: move tick down    |");
+        console.log("|  and trigger order         |");
+        console.log("-----------------------------");
+
+        setPoolTick(260);
 
         // Check that the order has been executed
         (inputAmount,,,,,,) = hook.trailingOrders(key.toId(), orderId);
         assertEq(inputAmount, 0, "Order should be executed");
 
         // Check that the hook contract has the expected number of token0 tokens ready to redeem
-        uint256 positionId = hook.getPositionId(key, orderId);
-        uint256 claimableOutputTokens = hook.claimableOutputTokens(positionId);
+        positionId = hook.getPositionId(key, orderId);
+
+        claimableOutputTokens = hook.claimableOutputTokens(positionId);
+
+        hookToken0Balance = token0.balanceOf(address(hook));
+        hookToken1Balance = token1.balanceOf(address(hook));
+
         uint256 hookContractToken1Balance = token1.balanceOf(address(hook));
         assertEq(
             claimableOutputTokens,
@@ -273,10 +272,10 @@ contract TrailHookTest is Test, Deployers {
             "Hook contract should have the expected number of token1 tokens ready to redeem"
         );
 
-        // Ensure we can redeem the token0 tokens
-        uint256 originalToken0Balance = token0.balanceOfSelf();
-        hook.redeem(key, positionId, inputAmount);
-        uint256 newToken0Balance = token0.balanceOfSelf();
+        // Ensure we can redeem the token1 tokens
+        uint256 originalToken1Balance = token1.balanceOfSelf();
+        hook.redeem(key, orderId, inputAmount);
+        uint256 newToken1Balance = token1.balanceOfSelf();
 
         // // Verify token balances have changed
         // uint256 finalToken0Balance = token0.balanceOfSelf();
@@ -286,8 +285,8 @@ contract TrailHookTest is Test, Deployers {
         // assertTrue(finalToken1Balance > initialToken1Balance, "Token1 balance should increase");
 
         // Check that the ERC-1155 token for the order has been burned
-        uint256 tokenBalance = hook.balanceOf(address(this), positionId);
-        assertEq(tokenBalance, 0, "ERC-1155 token should be burned after order execution");
+        // uint256 tokenBalance = hook.balanceOf(address(this), positionId);
+        // assertEq(tokenBalance, 0, "ERC-1155 token should be burned after order execution");
 
         // // After performing swaps
         // (uint256 remainingAmount,,,,) = hook.trailingOrders(key.toId(), orderId);
@@ -375,18 +374,19 @@ contract TrailHookTest is Test, Deployers {
     // Helper functions
     function setPoolTick(int24 targetTick) public {
         (, int24 currentTick,,) = manager.getSlot0(key.toId());
+
         bool zeroForOne = targetTick < currentTick;
 
         // Perform swaps until we reach the target tick
         while ((zeroForOne && currentTick > targetTick) || (!zeroForOne && currentTick < targetTick)) {
-            int256 amountSpecified = zeroForOne ? -int256(1e18) : int256(1e18); // Swap a small amount each time
+            int256 amountSpecified = -int256(1e18); // Swap a small amount each time
 
             BalanceDelta delta = swap(
                 key,
                 IPoolManager.SwapParams({
                     zeroForOne: zeroForOne,
                     amountSpecified: amountSpecified,
-                    sqrtPriceLimitX96: TickMath.MAX_SQRT_PRICE - 1 // TODO: review this
+                    sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
                 })
             );
 

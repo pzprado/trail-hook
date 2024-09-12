@@ -82,6 +82,8 @@ contract TrailHook is BaseHook, ERC1155 {
 
     constructor(IPoolManager _manager, string memory _uri) BaseHook(_manager) ERC1155(_uri) {}
 
+    // ============ Hook Configuration ============
+
     function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
         return Hooks.Permissions({
             beforeInitialize: false,
@@ -100,6 +102,8 @@ contract TrailHook is BaseHook, ERC1155 {
             afterRemoveLiquidityReturnDelta: false
         });
     }
+
+    // ============ Hook Callbacks ============
 
     function afterInitialize(address, PoolKey calldata key, uint160, int24 tick, bytes calldata)
         external
@@ -129,7 +133,15 @@ contract TrailHook is BaseHook, ERC1155 {
         return (this.afterSwap.selector, 0);
     }
 
-    // Core Hook External Functions
+    // ============ External Functions ============
+
+    /// @notice Place a trailing order
+    /// @param key The pool key
+    /// @param trailingDistance The trailing distance in ticks
+    /// @param zeroForOne Whether the order is a sell order (true) or buy order (false)
+    /// @param inputAmount The amount of tokens to sell (or buy)
+    /// @param minOutputAmount The minimum amount of tokens to receive (or sell)
+    /// @param startTick The tick at which the trailing order should start
     function placeTrailingOrder(
         PoolKey calldata key,
         int24 trailingDistance,
@@ -138,6 +150,15 @@ contract TrailHook is BaseHook, ERC1155 {
         uint256 minOutputAmount,
         int24 startTick
     ) external returns (uint256 orderId) {
+        // Align ticks with pool spacing
+        int24 alignedStartTick = getLowerUsableTick(startTick, key.tickSpacing);
+        int24 alignedTrailingDistance = getLowerUsableTick(trailingDistance, key.tickSpacing);
+
+        // Validate inputs
+        console.log("Trailing distance:", alignedTrailingDistance);
+        require(alignedTrailingDistance > 0, "Invalid trailing distance");
+        require(inputAmount > 0, "Invalid input amount");
+
         // Transfer tokens to the contract first
         address sellToken = zeroForOne ? Currency.unwrap(key.currency0) : Currency.unwrap(key.currency1);
         IERC20(sellToken).transferFrom(msg.sender, address(this), inputAmount);
@@ -146,15 +167,16 @@ contract TrailHook is BaseHook, ERC1155 {
         orderId = nextOrderId++;
         (, int24 currentTick,,) = poolManager.getSlot0(key.toId());
 
-        bool isActive = (zeroForOne && currentTick <= startTick) || (!zeroForOne && currentTick >= startTick);
+        bool isActive =
+            (zeroForOne && currentTick <= alignedStartTick) || (!zeroForOne && currentTick >= alignedStartTick);
 
         trailingOrders[key.toId()][orderId] = TrailingOrder({
             inputAmount: inputAmount,
-            trailingDistance: trailingDistance,
-            lastTrackedTick: isActive ? currentTick : startTick,
+            trailingDistance: alignedTrailingDistance,
+            lastTrackedTick: isActive ? currentTick : alignedStartTick,
             zeroForOne: zeroForOne,
             minOutputAmount: minOutputAmount,
-            startTick: startTick,
+            startTick: alignedStartTick,
             isActive: isActive
         });
 
@@ -165,9 +187,14 @@ contract TrailHook is BaseHook, ERC1155 {
         claimTokensSupply[positionId] += inputAmount;
         _mint(msg.sender, positionId, inputAmount, "");
 
-        emit TrailingOrderPlaced(orderId, msg.sender, trailingDistance, inputAmount, zeroForOne, startTick, isActive);
+        emit TrailingOrderPlaced(
+            orderId, msg.sender, alignedTrailingDistance, inputAmount, zeroForOne, alignedStartTick, isActive
+        );
     }
 
+    /// @notice Cancel an existing trailing order
+    /// @param key The pool key
+    /// @param orderId The ID of the order to cancel
     function cancelTrailingOrder(PoolKey calldata key, uint256 orderId) external {
         if (orderOwners[orderId] != msg.sender) revert Unauthorized();
 
@@ -190,6 +217,10 @@ contract TrailHook is BaseHook, ERC1155 {
         emit TrailingOrderCancelled(orderId);
     }
 
+    /// @notice Redeem tokens for a completed order
+    /// @param key The pool key
+    /// @param orderId The ID of the order to redeem
+    /// @param inputAmountToClaimFor The amount of input tokens to claim for
     function redeem(PoolKey calldata key, uint256 orderId, uint256 inputAmountToClaimFor) external {
         uint256 positionId = getPositionId(key, orderId);
 
@@ -212,7 +243,8 @@ contract TrailHook is BaseHook, ERC1155 {
         token.transfer(msg.sender, outputAmount);
     }
 
-    // Internal Functions
+    // ============ Internal Functions ============
+
     function updateAndExecuteTrailingOrders(PoolKey calldata key, int24 currentTick, int24 lastTick) internal {
         PoolId poolId = key.toId();
         uint256 orderId = 1;
@@ -281,7 +313,7 @@ contract TrailHook is BaseHook, ERC1155 {
             IPoolManager.SwapParams({
                 zeroForOne: order.zeroForOne,
                 amountSpecified: -int256(order.inputAmount),
-                sqrtPriceLimitX96: order.zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1 // TODO: Market execution, this needs review
+                sqrtPriceLimitX96: order.zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1 // TODO: review
             })
         );
 
@@ -346,8 +378,15 @@ contract TrailHook is BaseHook, ERC1155 {
         poolManager.take(currency, address(this), amount);
     }
 
-    // Helper Functions
+    // ============ Helper Functions ============
+
     function getPositionId(PoolKey calldata key, uint256 orderId) public pure returns (uint256) {
         return uint256(keccak256(abi.encode(key.toId(), orderId)));
+    }
+
+    function getLowerUsableTick(int24 tick, int24 tickSpacing) private pure returns (int24) {
+        int24 intervals = tick / tickSpacing;
+        if (tick < 0 && tick % tickSpacing != 0) intervals--;
+        return intervals * tickSpacing;
     }
 }
