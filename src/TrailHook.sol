@@ -43,7 +43,6 @@ contract TrailHook is BaseHook, ERC1155 {
         int24 trailingDistance;
         int24 lastTrackedTick;
         bool zeroForOne;
-        uint256 minOutputAmount;
         int24 startTick; // New field to store the tick at which trailing should start
         bool isActive; // New field to indicate if the order is active
     }
@@ -78,7 +77,6 @@ contract TrailHook is BaseHook, ERC1155 {
     error NothingToClaim();
     error NotEnoughToClaim();
     error Unauthorized();
-    error SlippageToleranceExceeded();
 
     constructor(IPoolManager _manager, string memory _uri) BaseHook(_manager) ERC1155(_uri) {}
 
@@ -140,14 +138,12 @@ contract TrailHook is BaseHook, ERC1155 {
     /// @param trailingDistance The trailing distance in ticks
     /// @param zeroForOne Whether the order is a sell order (true) or buy order (false)
     /// @param inputAmount The amount of tokens to sell (or buy)
-    /// @param minOutputAmount The minimum amount of tokens to receive (or sell)
     /// @param startTick The tick at which the trailing order should start
     function placeTrailingOrder(
         PoolKey calldata key,
         int24 trailingDistance,
         bool zeroForOne,
         uint256 inputAmount,
-        uint256 minOutputAmount,
         int24 startTick
     ) external returns (uint256 orderId) {
         // Align ticks with pool spacing
@@ -167,15 +163,16 @@ contract TrailHook is BaseHook, ERC1155 {
         orderId = nextOrderId++;
         (, int24 currentTick,,) = poolManager.getSlot0(key.toId());
 
+        // For sell orders: zeroForOne && currentTick >= alignedStartTick
+        // For buy orders: !zeroForOne && currentTick <= alignedStartTick
         bool isActive =
-            (zeroForOne && currentTick <= alignedStartTick) || (!zeroForOne && currentTick >= alignedStartTick);
+            (zeroForOne && currentTick >= alignedStartTick) || (!zeroForOne && currentTick <= alignedStartTick);
 
         trailingOrders[key.toId()][orderId] = TrailingOrder({
             inputAmount: inputAmount,
             trailingDistance: alignedTrailingDistance,
             lastTrackedTick: isActive ? currentTick : alignedStartTick,
             zeroForOne: zeroForOne,
-            minOutputAmount: minOutputAmount,
             startTick: alignedStartTick,
             isActive: isActive
         });
@@ -230,7 +227,10 @@ contract TrailHook is BaseHook, ERC1155 {
         if (positionTokens < inputAmountToClaimFor) revert NotEnoughToClaim();
 
         uint256 totalClaimableForPosition = claimableOutputTokens[positionId];
+
         uint256 totalInputAmountForPosition = claimTokensSupply[positionId];
+
+        // outputAmount = (inputAmountToClaimFor * totalClaimableForPosition) / (totalInputAmountForPosition)
 
         uint256 outputAmount = inputAmountToClaimFor.mulDivDown(totalClaimableForPosition, totalInputAmountForPosition);
 
@@ -239,7 +239,9 @@ contract TrailHook is BaseHook, ERC1155 {
         _burn(msg.sender, positionId, inputAmountToClaimFor);
 
         TrailingOrder memory order = trailingOrders[key.toId()][orderId];
+
         Currency token = order.zeroForOne ? key.currency1 : key.currency0;
+
         token.transfer(msg.sender, outputAmount);
     }
 
@@ -266,8 +268,8 @@ contract TrailHook is BaseHook, ERC1155 {
             // If it doesn't, we skip to the next order
             if (!order.isActive) {
                 if (
-                    (order.zeroForOne && currentTick <= order.startTick)
-                        || (!order.zeroForOne && currentTick >= order.startTick)
+                    (order.zeroForOne && currentTick >= order.startTick)
+                        || (!order.zeroForOne && currentTick <= order.startTick)
                 ) {
                     order.isActive = true;
                     order.lastTrackedTick = currentTick;
@@ -319,17 +321,11 @@ contract TrailHook is BaseHook, ERC1155 {
 
         uint256 outputAmount = order.zeroForOne ? uint256(int256(delta.amount1())) : uint256(int256(delta.amount0()));
 
-        if (outputAmount < order.minOutputAmount) revert SlippageToleranceExceeded();
-
         uint256 positionId = getPositionId(key, orderId);
 
         claimableOutputTokens[positionId] += outputAmount;
 
         emit TrailingOrderExecuted(orderId, order.lastTrackedTick, outputAmount);
-
-        // Clear the order after execution
-        delete trailingOrders[key.toId()][orderId];
-        delete orderOwners[orderId];
     }
 
     function swapAndSettleBalances(PoolKey calldata key, IPoolManager.SwapParams memory params)

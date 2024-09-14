@@ -125,7 +125,6 @@ contract TrailHookTest is Test, Deployers {
         int24 trailingDistance = 60;
         uint256 amount = 10e18;
         bool zeroForOne = true;
-        uint256 minOutputAmount = 9.7e18; // 97% of input as minimum output for slippage protection
         (, int24 currentTick,,) = manager.getSlot0(key.toId());
         int24 startTick = currentTick; // Start immediately for this test
 
@@ -133,7 +132,7 @@ contract TrailHookTest is Test, Deployers {
         uint256 originalBalance = token0.balanceOfSelf();
 
         // Place the order
-        uint256 orderId = hook.placeTrailingOrder(key, trailingDistance, zeroForOne, amount, minOutputAmount, startTick);
+        uint256 orderId = hook.placeTrailingOrder(key, trailingDistance, zeroForOne, amount, startTick);
 
         // Note the new balance of token0 we have
         uint256 newBalance = token0.balanceOfSelf();
@@ -152,7 +151,6 @@ contract TrailHookTest is Test, Deployers {
             int24 orderTrailingDistance,
             int24 lastTrackedTick,
             bool orderZeroForOne,
-            uint256 orderMinOutputAmount,
             int24 orderStartTick,
             bool isActive
         ) = hook.trailingOrders(key.toId(), orderId);
@@ -160,7 +158,6 @@ contract TrailHookTest is Test, Deployers {
         // assertEq(inputAmount, amount);
         // assertEq(orderTrailingDistance, trailingDistance);
         assertEq(orderZeroForOne, zeroForOne);
-        assertEq(orderMinOutputAmount, minOutputAmount);
         assertEq(orderStartTick, startTick);
         assertTrue(isActive);
 
@@ -170,7 +167,6 @@ contract TrailHookTest is Test, Deployers {
 
         // Check the balance of ERC-1155 tokens we received
         uint256 positionId = hook.getPositionId(key, orderId);
-        uint256 tokenBalance = hook.balanceOf(address(this), positionId);
 
         // Ensure that we were, in fact, given ERC-1155 tokens for the order
         // equal to the `amount` of token0 tokens we placed the order for
@@ -186,12 +182,15 @@ contract TrailHookTest is Test, Deployers {
         int24 trailingDistance = 180;
         uint256 amount = 10e18;
         bool zeroForOne = true;
-        uint256 minOutputAmount = 9.9e18;
         (, int24 currentTick,,) = manager.getSlot0(key.toId());
         int24 startTick = currentTick; // Start immediately for this test
 
         // Place the trailing order
-        uint256 orderId = hook.placeTrailingOrder(key, trailingDistance, zeroForOne, amount, minOutputAmount, startTick);
+        uint256 orderId = hook.placeTrailingOrder(key, trailingDistance, zeroForOne, amount, startTick);
+
+        // // Check position token
+        uint256 positionId = hook.getPositionId(key, orderId);
+        uint256 tokenBalance = hook.balanceOf(address(this), positionId);
 
         (, currentTick,,) = manager.getSlot0(key.toId());
 
@@ -208,7 +207,7 @@ contract TrailHookTest is Test, Deployers {
 
         setPoolTick(440);
 
-        (,, int24 lastTrackedTick,,,,) = hook.trailingOrders(key.toId(), orderId);
+        (,, int24 lastTrackedTick,,,) = hook.trailingOrders(key.toId(), orderId);
         (, currentTick,,) = manager.getSlot0(key.toId());
         console.log("Last tracked tick:", lastTrackedTick);
         console.log("Current tick:", currentTick);
@@ -223,25 +222,18 @@ contract TrailHookTest is Test, Deployers {
 
         setPoolTick(320);
 
-        (,, lastTrackedTick,,,,) = hook.trailingOrders(key.toId(), orderId);
+        (,, lastTrackedTick,,,) = hook.trailingOrders(key.toId(), orderId);
         (, currentTick,,) = manager.getSlot0(key.toId());
         console.log("Last tracked tick:", lastTrackedTick);
         console.log("Current tick:", currentTick);
         console.log("Current distance:", lastTrackedTick - currentTick);
 
         // Check that the order is not executed yet
-        (uint256 inputAmount,,,,,,) = hook.trailingOrders(key.toId(), orderId);
+        (uint256 inputAmount,,,,,) = hook.trailingOrders(key.toId(), orderId);
         assertEq(inputAmount, amount, "Order should not be executed yet");
-
-        uint256 positionId = hook.getPositionId(key, orderId);
-
-        uint256 claimableOutputTokens = hook.claimableOutputTokens(positionId);
-        console.log("claimableOutputTokens: %18e", claimableOutputTokens);
 
         uint256 hookToken0Balance = token0.balanceOf(address(hook));
         uint256 hookToken1Balance = token1.balanceOf(address(hook));
-        console.log(" hookToken0Balance: %18e", hookToken0Balance);
-        console.log(" hookToken1Balance: %18e", hookToken1Balance);
 
         //*****
         // Part 3: Move the tick down and trigger the order
@@ -253,123 +245,210 @@ contract TrailHookTest is Test, Deployers {
 
         setPoolTick(260);
 
-        // Check that the order has been executed
-        (inputAmount,,,,,,) = hook.trailingOrders(key.toId(), orderId);
-        assertEq(inputAmount, 0, "Order should be executed");
+        // Check that the order has been executed and the hook contract has the expected number of token1 tokens ready to redeem
+        uint256 claimableOutputTokens = hook.claimableOutputTokens(positionId);
+        uint256 newHookToken0Balance = token0.balanceOf(address(hook));
+        uint256 newHookToken1Balance = token1.balanceOf(address(hook));
+        assertTrue(newHookToken0Balance < hookToken0Balance, "Order should be executed");
+        assertEq(newHookToken0Balance, 0, "Order should be executed");
+        assertTrue(newHookToken1Balance > hookToken1Balance, "Order should be executed");
+        assertEq(newHookToken1Balance, claimableOutputTokens, "There should be output tokens to claim");
 
-        // Check that the hook contract has the expected number of token0 tokens ready to redeem
-        positionId = hook.getPositionId(key, orderId);
-
-        claimableOutputTokens = hook.claimableOutputTokens(positionId);
-
-        hookToken0Balance = token0.balanceOf(address(hook));
-        hookToken1Balance = token1.balanceOf(address(hook));
-
-        uint256 hookContractToken1Balance = token1.balanceOf(address(hook));
-        assertEq(
-            claimableOutputTokens,
-            hookContractToken1Balance,
-            "Hook contract should have the expected number of token1 tokens ready to redeem"
-        );
-
-        // Ensure we can redeem the token1 tokens
-        uint256 originalToken1Balance = token1.balanceOfSelf();
-        hook.redeem(key, orderId, inputAmount);
-        uint256 newToken1Balance = token1.balanceOfSelf();
-
-        // // Verify token balances have changed
-        // uint256 finalToken0Balance = token0.balanceOfSelf();
-        // uint256 finalToken1Balance = token1.balanceOfSelf();
-
-        // assertTrue(finalToken0Balance < initialToken0Balance, "Token0 balance should decrease");
-        // assertTrue(finalToken1Balance > initialToken1Balance, "Token1 balance should increase");
+        uint256 originalToken1Balance = token1.balanceOf(address(this));
+        // Ensure we can redeem the token1
+        hook.redeem(key, orderId, 10e18);
+        uint256 newToken1Balance = token1.balanceOf(address(this));
+        assertEq(newToken1Balance - originalToken1Balance, claimableOutputTokens);
 
         // Check that the ERC-1155 token for the order has been burned
-        // uint256 tokenBalance = hook.balanceOf(address(this), positionId);
-        // assertEq(tokenBalance, 0, "ERC-1155 token should be burned after order execution");
-
-        // // After performing swaps
-        // (uint256 remainingAmount,,,,) = hook.trailingOrders(key.toId(), orderId);
-        // assertEq(remainingAmount, 0, "Order should be executed");
+        tokenBalance = hook.balanceOf(address(this), positionId);
+        assertEq(tokenBalance, 0, "ERC-1155 token should be burned after order execution");
     }
 
-    // function test_delayedTrailingOrder() public {
-    //     int24 trailingDistance = 50;
-    //     uint256 amount = 10e18;
-    //     bool zeroForOne = false; // Buying token0 with token1
-    //     uint256 minOutputAmount = 9.9e18;
-    //     (, int24 currentTick,,) = manager.getSlot0(key.toId());
-    //     int24 startTick = currentTick + 100; // Start 100 ticks above current price
+    function test_delayedTrailingOrder() public {
+        //*****
+        // This sets a start trailing in the future
+        //*****
 
-    //     // Place the delayed trailing order
-    //     uint256 orderId = hook.placeTrailingOrder(key, trailingDistance, zeroForOne, amount, minOutputAmount, startTick);
+        // Setup initial conditions
+        int24 trailingDistance = 180;
+        uint256 amount = 10e18;
+        bool zeroForOne = true;
+        (, int24 currentTick,,) = manager.getSlot0(key.toId());
+        int24 startTick = currentTick + 400; // Start in the future
 
-    //     // Check that the order is not active yet
-    //     (,,,,,, bool isActive) = hook.trailingOrders(key.toId(), orderId);
-    //     assertFalse(isActive, "Order should not be active yet");
+        // Place the trailing order
+        uint256 orderId = hook.placeTrailingOrder(key, trailingDistance, zeroForOne, amount, startTick);
 
-    //     // Record initial balances
-    //     uint256 initialToken0Balance = token0.balanceOfSelf();
-    //     uint256 initialToken1Balance = token1.balanceOfSelf();
+        // // Check position token
+        uint256 positionId = hook.getPositionId(key, orderId);
+        uint256 tokenBalance = hook.balanceOf(address(this), positionId);
 
-    //     // Perform swaps to move the price up to the start tick
-    //     while (currentTick < startTick) {
-    //         swap(
-    //             key,
-    //             IPoolManager.SwapParams({
-    //                 zeroForOne: false,
-    //                 amountSpecified: -1e18,
-    //                 sqrtPriceLimitX96: TickMath.MAX_SQRT_PRICE - 1
-    //             })
-    //         );
-    //         (, currentTick,,) = manager.getSlot0(key.toId());
-    //     }
+        (, currentTick,,) = manager.getSlot0(key.toId());
 
-    //     // Simulate the afterSwap hook call
-    //     hook.afterSwap(
-    //         address(0),
-    //         key,
-    //         IPoolManager.SwapParams({zeroForOne: false, amountSpecified: 0, sqrtPriceLimitX96: 0}),
-    //         BalanceDelta.wrap(0),
-    //         ""
-    //     );
+        // Record initial balances
+        uint256 initialToken0Balance = token0.balanceOfSelf();
+        uint256 initialToken1Balance = token1.balanceOfSelf();
 
-    //     // Check that the order is now active
-    //     (,,,,,, isActive) = hook.trailingOrders(key.toId(), orderId);
-    //     assertTrue(isActive, "Order should be active now");
+        //*****
+        // Part 1: Move the tick up
+        //*****
+        console.log("-----------------------------");
+        console.log("|  Part 1: move tick up     |");
+        console.log("-----------------------------");
 
-    //     // Perform more swaps to test the trailing logic
-    //     for (uint256 i = 0; i < 5; i++) {
-    //         swap(
-    //             key,
-    //             IPoolManager.SwapParams({
-    //                 zeroForOne: true,
-    //                 amountSpecified: 1e18,
-    //                 sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1
-    //             })
-    //         );
-    //         hook.afterSwap(
-    //             address(0),
-    //             key,
-    //             IPoolManager.SwapParams({zeroForOne: true, amountSpecified: 0, sqrtPriceLimitX96: 0}),
-    //             BalanceDelta.wrap(0),
-    //             ""
-    //         );
-    //     }
+        setPoolTick(440);
 
-    //     // Check if the order has been executed
-    //     (uint256 remainingAmount,,,,,,) = hook.trailingOrders(key.toId(), orderId);
-    //     assertEq(remainingAmount, 0, "Order should be executed");
+        (,, int24 lastTrackedTick,,,) = hook.trailingOrders(key.toId(), orderId);
+        (, currentTick,,) = manager.getSlot0(key.toId());
+        console.log("Last tracked tick:", lastTrackedTick);
+        console.log("Current tick:", currentTick);
+        console.log("Current distance:", lastTrackedTick - currentTick);
 
-    //     // Verify token balances have changed
-    //     assertTrue(token0.balanceOfSelf() > amount, "Token0 balance should increase");
-    //     assertTrue(token1.balanceOfSelf() < initialToken1Balance, "Token1 balance should decrease");
+        //*****
+        // Part 2: Move the tick down
+        //******
+        console.log("-----------------------------");
+        console.log("|  Part 2: move tick down   |");
+        console.log("-----------------------------");
 
-    //     // Check that the ERC-1155 token for the order has been burned
-    //     uint256 positionId = hook.getPositionId(key, orderId);
-    //     uint256 tokenBalance = hook.balanceOf(address(this), positionId);
-    //     assertEq(tokenBalance, 0, "ERC-1155 token should be burned after order execution");
-    // }
+        setPoolTick(320);
+
+        (,, lastTrackedTick,,,) = hook.trailingOrders(key.toId(), orderId);
+        (, currentTick,,) = manager.getSlot0(key.toId());
+        console.log("Last tracked tick:", lastTrackedTick);
+        console.log("Current tick:", currentTick);
+        console.log("Current distance:", lastTrackedTick - currentTick);
+
+        // Check that the order is not executed yet
+        (uint256 inputAmount,,,,,) = hook.trailingOrders(key.toId(), orderId);
+        assertEq(inputAmount, amount, "Order should not be executed yet");
+
+        uint256 hookToken0Balance = token0.balanceOf(address(hook));
+        uint256 hookToken1Balance = token1.balanceOf(address(hook));
+
+        //*****
+        // Part 3: Move the tick down and trigger the order
+        //******
+        console.log("-----------------------------");
+        console.log("|  Part 3: move tick down    |");
+        console.log("|  and trigger order         |");
+        console.log("-----------------------------");
+
+        setPoolTick(260);
+
+        // Check that the order has been executed and the hook contract has the expected number of token1 tokens ready to redeem
+        uint256 claimableOutputTokens = hook.claimableOutputTokens(positionId);
+        uint256 newHookToken0Balance = token0.balanceOf(address(hook));
+        uint256 newHookToken1Balance = token1.balanceOf(address(hook));
+        assertTrue(newHookToken0Balance < hookToken0Balance, "Order should be executed");
+        assertEq(newHookToken0Balance, 0, "Order should be executed");
+        assertTrue(newHookToken1Balance > hookToken1Balance, "Order should be executed");
+        assertEq(newHookToken1Balance, claimableOutputTokens, "There should be output tokens to claim");
+
+        uint256 originalToken1Balance = token1.balanceOf(address(this));
+        // Ensure we can redeem the token1
+        hook.redeem(key, orderId, 10e18);
+        uint256 newToken1Balance = token1.balanceOf(address(this));
+        assertEq(newToken1Balance - originalToken1Balance, claimableOutputTokens);
+
+        // Check that the ERC-1155 token for the order has been burned
+        tokenBalance = hook.balanceOf(address(this), positionId);
+        assertEq(tokenBalance, 0, "ERC-1155 token should be burned after order execution");
+    }
+
+    function testFail_delayedTrailingOrder() public {
+        //*****
+        // This sets a start trailing in the future that never gets actived
+        // (same as the delayed trailing order test, but with higher start tick value)
+        //*****
+
+        // Setup initial conditions
+        int24 trailingDistance = 180;
+        uint256 amount = 10e18;
+        bool zeroForOne = true;
+        (, int24 currentTick,,) = manager.getSlot0(key.toId());
+        int24 startTick = currentTick + 500; // Start in the future
+
+        // Place the trailing order
+        uint256 orderId = hook.placeTrailingOrder(key, trailingDistance, zeroForOne, amount, startTick);
+
+        // // Check position token
+        uint256 positionId = hook.getPositionId(key, orderId);
+        uint256 tokenBalance = hook.balanceOf(address(this), positionId);
+
+        (, currentTick,,) = manager.getSlot0(key.toId());
+
+        // Record initial balances
+        uint256 initialToken0Balance = token0.balanceOfSelf();
+        uint256 initialToken1Balance = token1.balanceOfSelf();
+
+        //*****
+        // Part 1: Move the tick up
+        //*****
+        console.log("-----------------------------");
+        console.log("|  Part 1: move tick up     |");
+        console.log("-----------------------------");
+
+        setPoolTick(440);
+
+        (,, int24 lastTrackedTick,,,) = hook.trailingOrders(key.toId(), orderId);
+        (, currentTick,,) = manager.getSlot0(key.toId());
+        console.log("Last tracked tick:", lastTrackedTick);
+        console.log("Current tick:", currentTick);
+        console.log("Current distance:", lastTrackedTick - currentTick);
+
+        //*****
+        // Part 2: Move the tick down
+        //******
+        console.log("-----------------------------");
+        console.log("|  Part 2: move tick down   |");
+        console.log("-----------------------------");
+
+        setPoolTick(320);
+
+        (,, lastTrackedTick,,,) = hook.trailingOrders(key.toId(), orderId);
+        (, currentTick,,) = manager.getSlot0(key.toId());
+        console.log("Last tracked tick:", lastTrackedTick);
+        console.log("Current tick:", currentTick);
+        console.log("Current distance:", lastTrackedTick - currentTick);
+
+        // Check that the order is not executed yet
+        (uint256 inputAmount,,,,,) = hook.trailingOrders(key.toId(), orderId);
+        assertEq(inputAmount, amount, "Order should not be executed yet");
+
+        uint256 hookToken0Balance = token0.balanceOf(address(hook));
+        uint256 hookToken1Balance = token1.balanceOf(address(hook));
+
+        //*****
+        // Part 3: Move the tick down and trigger the order
+        //******
+        console.log("-----------------------------");
+        console.log("|  Part 3: move tick down    |");
+        console.log("|  and trigger order         |");
+        console.log("-----------------------------");
+
+        setPoolTick(260);
+
+        // Check that the order has been executed and the hook contract has the expected number of token1 tokens ready to redeem
+        uint256 claimableOutputTokens = hook.claimableOutputTokens(positionId);
+        uint256 newHookToken0Balance = token0.balanceOf(address(hook));
+        uint256 newHookToken1Balance = token1.balanceOf(address(hook));
+        assertTrue(newHookToken0Balance < hookToken0Balance, "Order should be executed");
+        assertEq(newHookToken0Balance, 0, "Order should be executed");
+        assertTrue(newHookToken1Balance > hookToken1Balance, "Order should be executed");
+        assertEq(newHookToken1Balance, claimableOutputTokens, "There should be output tokens to claim");
+
+        uint256 originalToken1Balance = token1.balanceOf(address(this));
+        // Ensure we can redeem the token1
+        hook.redeem(key, orderId, 10e18);
+        uint256 newToken1Balance = token1.balanceOf(address(this));
+        assertEq(newToken1Balance - originalToken1Balance, claimableOutputTokens);
+
+        // Check that the ERC-1155 token for the order has been burned
+        tokenBalance = hook.balanceOf(address(this), positionId);
+        assertEq(tokenBalance, 0, "ERC-1155 token should be burned after order execution");
+    }
 
     // Helper functions
     function setPoolTick(int24 targetTick) public {
