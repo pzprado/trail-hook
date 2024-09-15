@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 pragma solidity ^0.8.0;
 
-import "forge-std/console.sol";
 import {BaseHook} from "v4-periphery/src/base/hooks/BaseHook.sol";
 import {ERC1155} from "@openzeppelin/contracts/token/ERC1155/ERC1155.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
@@ -151,7 +150,6 @@ contract TrailHook is BaseHook, ERC1155 {
         int24 alignedTrailingDistance = getLowerUsableTick(trailingDistance, key.tickSpacing);
 
         // Validate inputs
-        console.log("Trailing distance:", alignedTrailingDistance);
         require(alignedTrailingDistance > 0, "Invalid trailing distance");
         require(inputAmount > 0, "Invalid input amount");
 
