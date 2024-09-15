@@ -450,16 +450,98 @@ contract TrailHookTest is Test, Deployers {
         assertEq(tokenBalance, 0, "ERC-1155 token should be burned after order execution");
     }
 
+    function test_cancelOrder() public {
+        // Setup initial conditions
+        int24 trailingDistance = 180;
+        uint256 amount = 10e18;
+        bool zeroForOne = true;
+        (, int24 currentTick,,) = manager.getSlot0(key.toId());
+        int24 startTick = currentTick; // Start immediately for this test
+
+        // Place the trailing order
+        uint256 orderId = hook.placeTrailingOrder(key, trailingDistance, zeroForOne, amount, startTick);
+
+        // Note the original balance of token0
+        uint256 originalBalance = token0.balanceOfSelf();
+
+        // Cancel the order
+        hook.cancelTrailingOrder(key, orderId);
+
+        // Check that the order has been cancelled
+        (uint256 inputAmount,,,,,) = hook.trailingOrders(key.toId(), orderId);
+        assertEq(inputAmount, 0, "Order should be cancelled");
+
+        // Check that the tokens have been returned
+        uint256 newBalance = token0.balanceOfSelf();
+        assertEq(newBalance, originalBalance + amount, "Tokens should be returned after cancellation");
+
+        // Check that the ERC-1155 token for the order has been burned
+        uint256 positionId = hook.getPositionId(key, orderId);
+        uint256 tokenBalance = hook.balanceOf(address(this), positionId);
+        assertEq(tokenBalance, 0, "ERC-1155 token should be burned after cancellation");
+    }
+
+    function test_partialRedeem() public {
+        // Setup initial conditions
+        int24 trailingDistance = 180;
+        uint256 amount = 10e18;
+        bool zeroForOne = true;
+        (, int24 currentTick,,) = manager.getSlot0(key.toId());
+        int24 startTick = currentTick; // Start immediately for this test
+
+        // Place the trailing order
+        uint256 orderId = hook.placeTrailingOrder(key, trailingDistance, zeroForOne, amount, startTick);
+
+        // Move the tick to trigger the order
+        setPoolTick(currentTick - 200);
+
+        // Redeem half of the amount
+        uint256 halfAmount = amount / 2;
+        uint256 originalBalance = token1.balanceOfSelf();
+        hook.redeem(key, orderId, halfAmount);
+
+        // Check the new balance
+        uint256 newBalance = token1.balanceOfSelf();
+        assertTrue(newBalance > originalBalance, "Should have received some token1");
+
+        // Try to redeem the other half
+        hook.redeem(key, orderId, halfAmount);
+
+        // Check the final balance
+        uint256 finalBalance = token1.balanceOfSelf();
+        assertTrue(finalBalance > newBalance, "Should have received more token1");
+
+        // Check that the ERC-1155 token for the order has been fully burned
+        uint256 positionId = hook.getPositionId(key, orderId);
+        uint256 tokenBalance = hook.balanceOf(address(this), positionId);
+        assertEq(tokenBalance, 0, "ERC-1155 token should be fully burned after complete redemption");
+    }
+
+    function test_tickSpacingAlignment() public {
+        // Setup initial conditions
+        int24 trailingDistance = 181; // Not aligned with tick spacing
+        uint256 amount = 10e18;
+        bool zeroForOne = true;
+        (, int24 currentTick,,) = manager.getSlot0(key.toId());
+        int24 startTick = currentTick + 61; // Not aligned with tick spacing
+
+        // Place the trailing order
+        uint256 orderId = hook.placeTrailingOrder(key, trailingDistance, zeroForOne, amount, startTick);
+
+        // Check that the order has been aligned correctly
+        (, int24 orderTrailingDistance,,, int24 orderStartTick,) = hook.trailingOrders(key.toId(), orderId);
+        assertEq(orderTrailingDistance, 180, "Trailing distance should be aligned to tick spacing");
+        assertEq(orderStartTick, currentTick + 60, "Start tick should be aligned to tick spacing");
+    }
+
     // Helper functions
     function setPoolTick(int24 targetTick) public {
         (, int24 currentTick,,) = manager.getSlot0(key.toId());
 
         bool zeroForOne = targetTick < currentTick;
-
         // Perform swaps until we reach the target tick
         while ((zeroForOne && currentTick > targetTick) || (!zeroForOne && currentTick < targetTick)) {
             int256 amountSpecified = -int256(1e18); // Swap a small amount each time
-
             BalanceDelta delta = swap(
                 key,
                 IPoolManager.SwapParams({
@@ -478,16 +560,5 @@ contract TrailHookTest is Test, Deployers {
         PoolSwapTest.TestSettings memory testSettings =
             PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
         delta = swapRouter.swap(key, params, testSettings, ZERO_BYTES);
-    }
-
-    function simulateSwap(bool zeroForOne) public {
-        // Simulate a swap by calling the afterSwap function of the hook
-        hook.afterSwap(
-            address(0),
-            key,
-            IPoolManager.SwapParams({zeroForOne: zeroForOne, amountSpecified: 0, sqrtPriceLimitX96: 0}),
-            BalanceDelta.wrap(0),
-            ""
-        );
     }
 }
